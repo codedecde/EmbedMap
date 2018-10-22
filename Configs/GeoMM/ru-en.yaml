@@ -1,0 +1,19 @@
+base_dir: Experiments/GeoMM
+src_lang: ru
+tgt_lang: en
+base_data_dir: "data"
+languages:
+  - filename: wiki.en.vec
+    name: en
+    mean_center: True
+    unit_norm: True
+  - filename: wiki.ru.vec
+    name: ru
+    mean_center: True
+    unit_norm: True
+base_dict_dir: "data/crosslingual/dictionaries"
+training_params:
+  lambda: 1000
+  max_opt_time: 5000
+  max_opt_iter: 150
+
