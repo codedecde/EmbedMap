@@ -22,8 +22,10 @@ Creates the vocabulary and inverse vocabulary
 store language metadata
 '''
 
+
 class Language(object):
-    def __init__(self, name, gpu=False, mode='seq', mean_center=False, unit_norm=False):
+    def __init__(self, name, gpu_device=-1,
+                 mode='seq', mean_center=False, unit_norm=False):
         """
         inputs
             :param name (str): The name of the vocab language
@@ -47,7 +49,7 @@ class Language(object):
         self.epoch = 0
         self.max_freq = -1
         self.mode = mode
-        self.gpu = gpu
+        self.gpu_device = gpu_device
         self.mean_center = mean_center
         self.unit_norm = unit_norm
 
@@ -105,7 +107,8 @@ class Language(object):
             np.save(os.path.join(folder, 'embeddings.npy'), self.embeddings)
             np.save(os.path.join(folder, 'ix2word.npy'), self.ix2word)
 
-        self.embeddings = to_cuda(torch.from_numpy(self.embeddings).float(), self.gpu)
+        self.embeddings = to_cuda(torch.from_numpy(self.embeddings).float(),
+                                  self.gpu_device)
         if self.mean_center:
             self.embeddings.sub_(self.embeddings.mean(0, keepdim=True))
         if self.unit_norm:
@@ -136,13 +139,7 @@ class Language(object):
             # idx = np.random.randint(0, self.max_freq + 1, size=(batch_sz))
             # idx = torch.LongTensor(idx)
             idx = torch.LongTensor(batch_sz).random_(self.max_freq + 1)
-        return (idx, self.embeddings[to_cuda(idx, self.gpu)])
-
-    def __len__(self):
-        """
-            Length of vocab
-        """
-        return self.vocab
+        return (idx, self.embeddings[to_cuda(idx, self.gpu_device)])
 
     def __str__(self):
         """
@@ -151,7 +148,7 @@ class Language(object):
         return self.name
 
     def get_embeddings(self, idx):
-        idx = to_cuda(torch.LongTensor(idx), self.gpu)
+        idx = to_cuda(torch.LongTensor(idx), self.gpu_device)
         return self.embeddings[idx]
 
 

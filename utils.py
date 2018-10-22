@@ -73,7 +73,7 @@ def setup_output_dir(output_dir, config, loglevel):
     best_model_dirname = os.path.join(new_dirname, 'best_model')
     make_directory(best_model_dirname)
     config_file = os.path.join(new_dirname, 'config.yaml')
-    config['data_params']['save_dir'] = new_dirname
+    config['save_dir'] = new_dirname
     write_to_yaml(config_file, config)
     # Save the git hash
     process = Popen('git log -1 --format="%H"'.split(), stdout=PIPE, stderr=PIPE)
@@ -127,14 +127,6 @@ def disp_params(params, name):
         # print(print_string)
         logger = logging.getLogger()
         logger.info(print_string)
-
-
-def convert2gpu(var, gpu):
-    return var.cuda() if gpu else var
-
-
-def getnumpy(tensor, gpu):
-    return tensor.cpu().data.numpy() if gpu else tensor.data.numpy()
 
 
 def pad_sequences(sequences, maxlen=None, dtype='int32',
@@ -329,7 +321,8 @@ class Progbar(object):
 
 
 def to_cuda(t, gpu):
-    return t.cuda() if gpu else t
+    return t.cuda(gpu) if gpu >= 0 else t
+
 
 def to_numpy(t, gpu):
     """

@@ -7,11 +7,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class CSLS(object):
     """
     Class that handles tasks related to Cross-domain Similarity Local Scaling
     """
-    def __init__(self, src, tgt, map_src=None, map_tgt=None, k=10, gpu=True, gpu_device=0):
+    def __init__(self, src, tgt, map_src=None, map_tgt=None, k=10, gpu_device=-1):
         """
         inputs:
             :param src (np.ndarray) : the source np.ndarray object
@@ -23,26 +24,30 @@ class CSLS(object):
         # assert type(src) is np.ndarray
         # assert type(tgt) is np.ndarray
         if map_src is None:
-            self.src = to_numpy(normalize(Variable(torch.Tensor(src))), gpu)
+            self.src = to_numpy(
+                normalize(Variable(torch.Tensor(src))), gpu_device >= 0)
         else:
-            # self.src = to_numpy(normalize(src.mm(W_src)), gpu)
-            self.src = to_numpy(normalize(map_src(Variable(src))), gpu)
+            # self.src = to_numpy(normalize(src.mm(W_src)), gpu_device >= 0)
+            self.src = to_numpy(
+                normalize(map_src(Variable(src))), gpu_device >= 0)
 
         if map_tgt is None:
-            self.tgt = to_numpy(normalize(Variable(torch.Tensor(tgt))), gpu)
+            self.tgt = to_numpy(
+                normalize(Variable(torch.Tensor(tgt))), gpu_device >= 0)
         else:
-            self.tgt = to_numpy(normalize(self.map_tgt(Variable(tgt))), gpu)
+            self.tgt = to_numpy(
+                normalize(self.map_tgt(Variable(tgt))), gpu_device >= 0)
 
         self.k = k
-        self.gpu = gpu
         self.gpu_device = gpu_device
 
-        self.r_src = get_mean_similarity(self.src, self.tgt, self.k, self.gpu, self.gpu_device)
-        self.r_tgt = get_mean_similarity(self.tgt, self.src, self.k, self.gpu, self.gpu_device)
-    
+        self.r_src = get_mean_similarity(
+            self.src, self.tgt, self.k, self.gpu_device)
+        self.r_tgt = get_mean_similarity(
+            self.tgt, self.src, self.k, self.gpu_device)
+
     def map_to_tgt(self, source_indices):
         return self.src[source_indices, ...]
-
 
     def get_closest_csls_matches(self, source_indices, n, mode="csls"):
         """
@@ -53,22 +58,27 @@ class CSLS(object):
             :param n (int) : the number of closest matches to obtain
         """
         logger.info("Using Mode: {0}".format(mode))
-        tgt_tensor = to_cuda(torch.Tensor(self.tgt), self.gpu).t()
+        tgt_tensor = to_cuda(torch.Tensor(self.tgt), self.gpu_device).t()
         src_tensor = torch.Tensor(self.map_to_tgt(source_indices))
 
-        r_src_tensor = to_cuda(torch.Tensor(self.r_src[source_indices, np.newaxis]), self.gpu)
-        r_tgt_tensor = to_cuda(torch.Tensor(self.r_tgt[np.newaxis, ...]), self.gpu)
-        
+        r_src_tensor = to_cuda(
+            torch.Tensor(self.r_src[source_indices, np.newaxis]),
+            self.gpu_device)
+        r_tgt_tensor = to_cuda(
+            torch.Tensor(self.r_tgt[np.newaxis, ...]), self.gpu_device)
+
         batched_list = []
         batched_list_idx = []
-        batch_size = 512 
+        batch_size = 512
         for i in range(0, src_tensor.shape[0], batch_size):
-            src_tensor_indexed = to_cuda(src_tensor[i:i+batch_size], self.gpu)
-            r_src_tensor_indexed = r_src_tensor[i:i+batch_size]
+            src_tensor_indexed = to_cuda(
+                src_tensor[i:i + batch_size], self.gpu_device)
+            r_src_tensor_indexed = r_src_tensor[i:i + batch_size]
             if mode == "nn":
                 batch_scores = src_tensor_indexed.mm(tgt_tensor)
             elif mode == "csls":
-                batch_scores = (2 * src_tensor_indexed.mm(tgt_tensor)) - r_src_tensor_indexed - r_tgt_tensor
+                batch_scores = (2 * src_tensor_indexed.mm(tgt_tensor)) - \
+                    r_src_tensor_indexed - r_tgt_tensor
             elif mode == "cdm":
                 mu_x = torch.sqrt(1. - r_src_tensor_indexed)
                 mu_y = torch.sqrt(1. - r_tgt_tensor)
@@ -76,14 +86,16 @@ class CSLS(object):
                 eps = 1e-3
                 batch_scores = -dxy / (mu_x + mu_y + eps)
             else:
-                raise NotImplementedError("{0} not implemented yet".format(mode))
+                raise NotImplementedError("{0} not implemented yet".format(
+                    mode))
             best_scores, best_ix = batch_scores.topk(n)
             batched_list.append(best_scores)
             batched_list_idx.append(best_ix)
-        return to_numpy(torch.cat(batched_list_idx, 0), self.gpu), to_numpy(torch.cat(batched_list, 0), self.gpu)
+        return to_numpy(torch.cat(batched_list_idx, 0), self.gpu_device >= 0),\
+            to_numpy(torch.cat(batched_list, 0), self.gpu_device >= 0)
 
 
-def get_faiss_nearest_neighbours(emb_src, emb_wrt, k, use_gpu=True, gpu_device=0):
+def get_faiss_nearest_neighbours(emb_src, emb_wrt, k, gpu_device=0):
     """
     Gets source points'/embeddings' nearest neighbours with respect to a set of target embeddings.
     inputs:
@@ -98,7 +110,7 @@ def get_faiss_nearest_neighbours(emb_src, emb_wrt, k, use_gpu=True, gpu_device=0
         :returns indices (np.ndarray) : [len(emb_src), k] matrix of indices of each source point to each of its k 
             nearest neighbours
     """
-    if use_gpu:
+    if gpu_device >= 0:
         res = faiss.StandardGpuResources()
         cfg = faiss.GpuIndexFlatConfig()
         cfg.device = gpu_device
@@ -108,7 +120,8 @@ def get_faiss_nearest_neighbours(emb_src, emb_wrt, k, use_gpu=True, gpu_device=0
     index.add(emb_wrt.astype('float32'))
     return index.search(emb_src.astype('float32'), k)
 
-def get_mean_similarity(emb_src, emb_wrt, k, use_gpu=True, gpu_device=0):
+
+def get_mean_similarity(emb_src, emb_wrt, k, gpu_device=0):
     """
     Gets the mean similarity of source embeddings with respect to a set of target embeddings.
     inputs:
@@ -118,8 +131,9 @@ def get_mean_similarity(emb_src, emb_wrt, k, use_gpu=True, gpu_device=0):
         :param use_gpu (bool) : true if the gpu is to be used
         :param gpu_device (int) : the GPU to be used
     """
-    nn_dists, _ = get_faiss_nearest_neighbours(emb_src, emb_wrt, k, use_gpu, gpu_device)
+    nn_dists, _ = get_faiss_nearest_neighbours(emb_src, emb_wrt, k, gpu_device)
     return nn_dists.mean(1)
+
 
 def normalize(arr):
     """
