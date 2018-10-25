@@ -6,11 +6,13 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
 import numpy as np
 import argparse
 import sys
-from rutils import *
+from rutils_cu import *
+from utils import to_numpy, to_cuda
+import torch
+import time
 
 parser = argparse.ArgumentParser(description='RCSLS for supervised word alignment')
 
@@ -35,35 +37,56 @@ parser.add_argument("--lr", type=float, default=1.0, help='learning rate')
 parser.add_argument("--niter", type=int, default=10, help='number of iterations')
 parser.add_argument('--sgd', action='store_true', help='use sgd')
 parser.add_argument("--batchsize", type=int, default=10000, help="batch size for sgd")
+parser.add_argument("--gpuid", type=int, help="Set to GPU number >= 0")
 
 params = parser.parse_args()
+
+gpuid = params.gpuid
+print("Using GPU ", gpuid)
 
 ###### SPECIFIC FUNCTIONS ######
 # functions specific to RCSLS
 # the rest of the functions are in utils.py
 
 def getknn(sc, x, y, k=10):
-    sidx = np.argpartition(sc, -k, axis=1)[:, -k:]
-    ytopk = y[sidx.flatten(), :]
+    sidx = torch.topk(sc, k, dim=1)[1]
+    ytopk = y[sidx.view(-1), :]
     ytopk = ytopk.reshape(sidx.shape[0], sidx.shape[1], y.shape[1])
-    f = np.sum(sc[np.arange(sc.shape[0])[:, None], sidx])
-    df = np.dot(ytopk.sum(1).T, x)
+    f = torch.sum(sc[np.arange(sc.shape[0])[:, None], sidx])
+    df = torch.mm(ytopk.sum(1).t(), x)
     return f / k, df / k
 
-
 def rcsls(X_src, Y_tgt, Z_src, Z_tgt, R, knn=10):
-    X_trans = np.dot(X_src, R.T)
-    f = 2 * np.sum(X_trans * Y_tgt)
-    df = 2 * np.dot(Y_tgt.T, X_src)
-    fk0, dfk0 = getknn(np.dot(X_trans, Z_tgt.T), X_src, Z_tgt, knn)
-    fk1, dfk1 = getknn(np.dot(np.dot(Z_src, R.T), Y_tgt.T).T, Y_tgt, Z_src, knn)
-    f = f - fk0 -fk1
-    df = df - dfk0 - dfk1.T
+    X_trans = torch.mm(X_src, R.t())
+    f = 2 * torch.sum(X_trans * Y_tgt)
+    df = 2 * torch.mm(Y_tgt.t(), X_src)
+    fk0, dfk0 = getknn(torch.mm(X_trans, Z_tgt.t()), 
+                       X_src,
+                       Z_tgt,
+                       knn)
+
+    obj1 = torch.mm(Z_src, R.t())
+    obj2 = Y_tgt.t()
+
+    # CUDA memory error when multiplying these 200000x300 and 300x200000
+    #   so converting to np
+    # obj_fin = torch.mm(obj1, obj2).t() 
+    obj1 = to_numpy(obj1, gpuid>=0)
+    obj2 = to_numpy(obj2, gpuid>=0)
+    obj_fin = np.dot(obj1, obj2).T
+    obj_fin = to_cuda(torch.Tensor(obj_fin), gpuid)
+
+    fk1, dfk1 = getknn(obj_fin, Y_tgt, Z_src)
+
+    f = f - fk0 - fk1
+    df = df - dfk0 - dfk1.t()
+
     return -f / X_src.shape[0], -df / X_src.shape[0]
 
 
 def proj_spectral(R):
-    U, s, V = np.linalg.svd(R)
+    R_np = to_numpy(R, gpuid>=0)
+    U, s, V = np.linalg.svd(R_np)
     s[s > 1] = 1
     s[s < 0] = 0
     return np.dot(U, np.dot(np.diag(s), V))
@@ -72,8 +95,8 @@ def proj_spectral(R):
 ###### MAIN ######
 
 # load word embeddings
-words_tgt, x_tgt = load_vectors(params.tgt_emb, maxload=params.maxload, center=params.center)
-words_src, x_src = load_vectors(params.src_emb, maxload=params.maxload, center=params.center)
+words_tgt, x_tgt_np = load_vectors(params.tgt_emb, maxload=params.maxload, center=params.center)
+words_src, x_src_np = load_vectors(params.src_emb, maxload=params.maxload, center=params.center)
 
 # load validation bilingual lexicon
 src2tgt, lexicon_size = load_lexicon(params.dico_test, words_src, words_tgt)
@@ -82,30 +105,48 @@ src2tgt, lexicon_size = load_lexicon(params.dico_test, words_src, words_tgt)
 idx_src = idx(words_src)
 idx_tgt = idx(words_tgt)
 
+
 # load train bilingual lexicon
 pairs = load_pairs(params.dico_train, idx_src, idx_tgt)
 if params.maxsup > 0 and params.maxsup < len(pairs):
     pairs = pairs[:params.maxsup]
 
+x_src = to_cuda(torch.Tensor(x_src_np), gpuid)
+x_tgt = to_cuda(torch.Tensor(x_tgt_np), gpuid)
+
 # selecting training vector  pairs
-X_src_train, Y_tgt_train = select_vectors_from_pairs(x_src, x_tgt, pairs)
+X_src_train, Y_tgt_train = select_vectors_from_pairs(x_src, x_tgt, pairs, gpuid=gpuid)
+# print(X_src_train[:5])
+# print(X_src_train_cu[:5])
+# sys.exit()
+
 
 # adding negatives for RCSLS
 Z_src = x_src[:params.maxneg, :]
 Z_tgt = x_tgt[:params.maxneg, :]
 
 # initialization:
-R = procrustes(X_src_train, Y_tgt_train)
-nnacc = compute_nn_accuracy(np.dot(x_src, R.T), x_tgt, src2tgt, lexicon_size=lexicon_size)
+R = procrustes(X_src_train, Y_tgt_train, gpuid)
+
+R_np = to_numpy(R, gpuid>=0)
+nnacc = compute_nn_accuracy(np.dot(x_src_np, R_np.T), x_tgt_np, src2tgt, lexicon_size=lexicon_size)
 print("[init -- Procrustes] NN: %.4f"%(nnacc))
 
-nnacc_csls = compute_csls_accuracy(np.dot(x_src, R.T), x_tgt, src2tgt, lexicon_size=lexicon_size)
+
+start_time = time.time()
+
+
+nnacc_csls = compute_csls_accuracy(torch.mm(x_src, R.t()), x_tgt, src2tgt, gpuid=gpuid, lexicon_size=lexicon_size)
+
+print("compute_csls_acc time (minutes): ", (time.time() - start_time) / 60)
 print("[init -- Procrustes] CSLS: %.4f"%(nnacc_csls))
 sys.stdout.flush()
 
 # optimization
 fold, Rold = 0, []
 niter, lr = params.niter, params.lr
+
+opt_start_time = time.time()
 
 for it in range(0, niter + 1):
     if lr < 1e-4:
@@ -118,6 +159,8 @@ for it in range(0, niter + 1):
         f, df = rcsls(X_src_train, Y_tgt_train, Z_src, Z_tgt, R, params.knn)
 
     if params.reg > 0:
+        print(type(lr))
+        print(type(params.reg))
         R *= (1 - lr * params.reg)
     R -= lr * df
     if params.model == "spectral":
@@ -132,20 +175,35 @@ for it in range(0, niter + 1):
 
     fold, Rold = f, R
 
-    if (it > 0 and it % 10 == 0) or it == niter:
-        nnacc = compute_nn_accuracy(np.dot(x_src, R.T), x_tgt, src2tgt, lexicon_size=lexicon_size)
-        print("[it=%d] NN = %.4f - Coverage = %.4f" % (it, nnacc, len(src2tgt) / lexicon_size))
+    # if (it > 0 and it % 10 == 0) or it == niter:
+        # nnacc = compute_nn_accuracy(np.dot(x_src, R.T), x_tgt, src2tgt, lexicon_size=lexicon_size)
+        # print("[it=%d] NN = %.4f - Coverage = %.4f" % (it, nnacc, len(src2tgt) / lexicon_size))
 
-nnacc = compute_nn_accuracy(np.dot(x_src, R.T), x_tgt, src2tgt, lexicon_size=lexicon_size)
+opt_end_time = time.time()
+print("Optimization total time (minutes): ", (opt_end_time - opt_start_time) / 60)
+
+nnacc = compute_nn_accuracy(to_numpy(torch.mm(x_src, R.t()), gpuid>=0), 
+                            to_numpy(x_tgt, gpuid>=0), 
+                            src2tgt, lexicon_size=lexicon_size)
 print("[final] NN = %.4f - Coverage = %.4f" % (nnacc, len(src2tgt) / lexicon_size))
-nnacc_csls = compute_csls_accuracy(np.dot(x_src, R.T), x_tgt, src2tgt, lexicon_size=lexicon_size)
+nnacc_csls = compute_csls_accuracy(torch.mm(x_src, R.t()), x_tgt, src2tgt, gpuid=gpuid, lexicon_size=lexicon_size)
 print("[final] CSLS = %.4f - Coverage = %.4f" % (
     nnacc_csls, len(src2tgt) / lexicon_size))
 
 if params.output != "":
     print("Saving all aligned vectors at %s" % params.output)
+    print("-computing")
     words_full, x_full = load_vectors(params.src_emb, maxload=-1, center=params.center, verbose=False)
-    x = np.dot(x_full, R.T)
-    x /= np.linalg.norm(x, axis=1)[:, np.newaxis] + 1e-8
-    save_vectors(params.output, x, words_full)
-    save_matrix(params.output + "-mat",  R)
+    # R_np = to_numpy(R, gpuid>=0)
+    # x = np.dot(x_full, R_np.T)
+    # x /= np.linalg.norm(x, axis=1)[:, np.newaxis] + 1e-8
+
+    x_full = to_cuda(torch.Tensor(x_full), gpuid)
+    x = torch.mm(x_full, R.t())
+    x /= torch.norm(x, p=2, dim=1).view(-1, 1) + 1e-8
+    R_np = to_numpy(R, gpuid>=0)
+    x_np = to_numpy(x, gpuid>=0)
+
+    print("-saving")
+    save_vectors(params.output, x_np, words_full)
+    save_matrix(params.output + "-mat",  R_np)
