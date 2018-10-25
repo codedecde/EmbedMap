@@ -194,16 +194,10 @@ if params.output != "":
     print("Saving all aligned vectors at %s" % params.output)
     print("-computing")
     words_full, x_full = load_vectors(params.src_emb, maxload=-1, center=params.center, verbose=False)
-    # R_np = to_numpy(R, gpuid>=0)
-    # x = np.dot(x_full, R_np.T)
-    # x /= np.linalg.norm(x, axis=1)[:, np.newaxis] + 1e-8
-
-    x_full = to_cuda(torch.Tensor(x_full), gpuid)
-    x = torch.mm(x_full, R.t())
-    x /= torch.norm(x, p=2, dim=1).view(-1, 1) + 1e-8
     R_np = to_numpy(R, gpuid>=0)
-    x_np = to_numpy(x, gpuid>=0)
+    x = np.dot(x_full, R_np.T)
+    x /= np.linalg.norm(x, axis=1)[:, np.newaxis] + 1e-8
 
     print("-saving")
-    save_vectors(params.output, x_np, words_full)
+    save_vectors(params.output, x, words_full)
     save_matrix(params.output + "-mat",  R_np)

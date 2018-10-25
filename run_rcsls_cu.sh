@@ -37,6 +37,7 @@ time python3 rcsls_cu.py --src_emb "${src_emb}" --tgt_emb "${tgt_emb}" \
   --dico_train "${dico_train}" --dico_test "${dico_test}" --output "${output}" \
   --lr 25 --niter 10 --model "${model}" --gpu "${GPUID}"
 
+exit
 echo "\n\nEvaluating---------------------------------------\n"
 python3 reval.py --src_emb "${output}" --tgt_emb "${tgt_emb}" \
   --dico_test "${dico_test}"
